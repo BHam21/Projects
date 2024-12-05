@@ -1,0 +1,123 @@
+import pdfplumber
+import pytesseract
+from PIL import Image, ImageEnhance
+import pandas as pd
+import re
+from pathlib import Path
+
+# Configure pytesseract path if necessary (only needed for Windows users)
+pytesseract.pytesseract.tesseract_cmd = "C:/Program Files/Tesseract-OCR/tesseract.exe"
+# Specify the directory containing the PDF files
+directory_path = "Data/TimeshareLeadData"  # Replace with your directory path
+
+# Initialize an empty list to store the extracted data
+data = []
+
+# Get a list of all PDF files in the directory
+pdf_files = list(Path(directory_path).glob("*.pdf"))
+print(f"Found {len(pdf_files)} PDF files in the directory.")
+
+# Function to perform OCR on a page with optional resolution adjustment and preprocessing
+def extract_text_with_ocr(pdf_page, dpi=400):
+    # Convert the page to a high-resolution image
+    image = pdf_page.to_image(resolution=dpi)
+    pil_image = image.original  # Get the PIL image
+
+    # Enhance contrast for better OCR results
+    enhancer = ImageEnhance.Contrast(pil_image)
+    processed_image = enhancer.enhance(2.0)  # Adjust contrast (default multiplier: 2.0)
+
+    # Perform OCR on the preprocessed image
+    text = pytesseract.image_to_string(pil_image)  # Use OCR with "table" mode
+    return text
+
+# Function to clean addresses by removing text after a country abbreviation
+def clean_address(address):
+    # List of country abbreviations (add more as needed)
+    countries = ["USA", "CANADA", "MEXICO", "PERU", "BAHAMAS", "COSTA RICA", "NORWAY", "PUERTO RICO",
+                 "ARGENTINA", "SAUDI ARABIA", "UNITED KINGDOM", "VENEZUELA", "VIETNAM", "YEMEN", "ZAMBIA","URUGUAY","PANAMA"]
+
+    # Create a regex pattern to match up to the country name
+    country_pattern = r"\b(" + "|".join(countries) + r")\b"
+    
+    # Find the first occurrence of a country and truncate the address after it
+    match = re.search(country_pattern, address, re.IGNORECASE)
+    if match:
+        # Keep everything up to the country match
+        address = address[:match.end()].strip()
+
+    # Remove multiple spaces or trailing punctuation
+    address = re.sub(r"\s{2,}", " ", address)  # Replace multiple spaces with one
+    address = address.strip(",. ")            # Remove trailing commas or periods
+    return address
+
+# Process each PDF file
+for pdf_path in pdf_files:
+    try:
+        print(f"Processing file: {pdf_path.name}")
+        with pdfplumber.open(pdf_path) as pdf:
+            for page_num, page in enumerate(pdf.pages):
+                # Skip the first page (Page 0 in zero-based indexing)
+                if page_num == 0:
+                    print(f"Skipping Page 1 of {pdf_path.name} (useless page).")
+                    continue
+
+                # Extract text directly using OCR with enhanced preprocessing
+                text = extract_text_with_ocr(page, dpi=400)
+
+                # Skip if no usable text was extracted
+                if not text.strip():
+                    print(f"Page {page_num + 1} contains no text after OCR. Skipping.")
+                    continue
+
+                # Match account number and associated text block
+                entries = re.finditer(r'(\d{9,})\s*((?:(?!\d{9,}).)*)', text, re.DOTALL)
+
+                for entry in entries:
+                    account_no = entry.group(1)
+                    entry_text = entry.group(2)
+
+                    # Split entry text into lines
+                    lines = [line.strip() for line in entry_text.split('\n') if line.strip()]
+
+                    # Separate names and address
+                    names = []
+                    address_lines = []
+                    address_started = False
+                    for line in lines:
+                        if not address_started and (re.search(r'\d+|PO Box|P\.O\. Box', line, re.IGNORECASE)):
+                            address_started = True
+                        if address_started:
+                            address_lines.append(line)
+                        else:
+                            names.append(line)
+
+                    if names and address_lines:
+                        # Combine names and address
+                        raw_name = '; '.join(names)
+                        raw_address = ', '.join(address_lines)
+                        
+                        # Clean the address
+                        cleaned_address = clean_address(raw_address)
+
+                        if raw_name and cleaned_address:
+                            data.append({
+                                'name': raw_name,
+                                'address': cleaned_address
+                            })
+
+    except Exception as e:
+        print(f"Error processing {pdf_path.name}: {str(e)}")
+
+# Create a DataFrame from the extracted data
+if data:
+    df = pd.DataFrame(data)
+    print(f"\nExtracted {len(df)} records from {len(pdf_files)} files.")
+    display(df)  # Display the DataFrame in Jupyter Notebook
+
+    # Optionally, save to a CSV file
+    csv_filename = "OsceolaCountyTimeshareNamesAddresses.csv"
+    df.to_csv(csv_filename, index=False)
+    print(f"Data saved to {csv_filename}")
+else:
+    print("No names and addresses were extracted. Please check the PDF files.")
